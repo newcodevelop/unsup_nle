@@ -1,0 +1,9 @@
+*.pt
+*.jpg
+*.png
+/transformers-research-projects
+/lxmert
+/train2014
+/val2014
+/data
+/vqav2
