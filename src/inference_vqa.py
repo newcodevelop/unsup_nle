@@ -191,6 +191,7 @@ import torch
 import torch.nn as nn
 import torch.optim as optim
 from torch.utils.data import DataLoader, TensorDataset
+import torch.nn.functional as F
 
 # Define the projection model
 class Projector(nn.Module):
@@ -216,6 +217,10 @@ class TripletLoss():
         # Calculate distances
         pos_dist = torch.sum(torch.pow(anchor - positive, 2), dim=1)
         neg_dist = torch.sum(torch.pow(anchor - negative, 2), dim=1)
+
+        # print(anchor.shape, positive.shape)
+        # print(0/0)
+        # F.cosine_similarity(anchor, positive, dim=1)
 
         # Compute triplet loss
         loss = torch.clamp(pos_dist - neg_dist + self.margin, min=0.0)
@@ -248,13 +253,25 @@ def train_projector(anchor_tensor, positive_tensor, negative_tensor, batch_size=
 
             # Compute loss
 
+            # print(projected_anchor.shape, batch_positive.shape)
+
+            pos_cossim = F.cosine_similarity(projected_anchor, batch_positive.to('cuda'), dim=1).mean()
+            neg_cossim = F.cosine_similarity(projected_anchor, batch_negative.to('cuda'), dim=1).mean()
+
+            # print(pos_cossim,neg_cossim)
+
+            # print(0/0)
+
             pos_dist = torch.sum(torch.pow(projected_anchor - batch_positive.to('cuda'), 2), dim=1)
             neg_dist = torch.sum(torch.pow(projected_anchor - batch_negative.to('cuda'), 2), dim=1)
 
             # Compute triplet loss
-            loss = torch.clamp(pos_dist - neg_dist + 1.0, min=0.0)
-            loss = torch.mean(loss)
-
+            loss = torch.clamp(pos_dist - neg_dist + 1.0, min=0.0) 
+            loss_cossim = 0.5*(pos_cossim - neg_cossim)
+            # loss_cossim = (pos_cossim - neg_cossim)
+            loss = torch.mean(loss) + loss_cossim
+            # loss += loss_cossim
+            # loss = (pos_cossim - neg_cossim)
 
             # loss = triplet_loss.calc_loss(projected_anchor, batch_positive.to('cuda'), batch_negative.to('cuda'))
 
@@ -290,7 +307,7 @@ proj_model = train_projector(
     positive_tensor=positives_,
     negative_tensor=negatives_,
     batch_size=8,  # Process 8 examples at a time
-    num_epochs=5
+    num_epochs=50
 )
 
 
@@ -351,7 +368,7 @@ from scipy.spatial import distance
 def satisfies_constraint_or_promising(llava_processor, new_seq, constant_vector, k=50, threshold=0.995):
   new_input_ids = new_seq['input_ids']
   candidates = llava_processor.tokenizer.batch_decode(new_input_ids, skip_special_tokens=True)[-1].split('ASSISTANT:')[-1]
-  # print('cand', candidates)
+  #   print('cand', candidates)
 
 
   clip_inputs = clip_tokenizer(candidates, return_tensors="pt", padding=True)
@@ -367,7 +384,9 @@ def satisfies_constraint_or_promising(llava_processor, new_seq, constant_vector,
     target_future_embedding = mlp(clip_embeddings)
 
   # print(target_future_embedding.shape)
+  #   print(F.cosine_similarity(target_future_embedding, constant_vector, dim=-1))
   dist_projected = distance.cosine(target_future_embedding.cpu().squeeze().numpy(), constant_vector.cpu().squeeze().numpy())
+  #   print(dist_projected)
   dist_now = distance.cosine(clip_embeddings.cpu().squeeze().numpy(), constant_vector.cpu().squeeze().numpy())
 
   dist = (dist_projected+dist_now)/2
@@ -384,8 +403,7 @@ llava_tokenizer = AutoTokenizer.from_pretrained("llava-hf/llava-1.5-7b-hf")
 
 
 
-
-def beam_search_1(llava_model, llava_processor, constant_vector, input_text, image, beam_width=4, max_length=5, topk=200, threshold=0.9):
+def beam_search_1(llava_model, llava_processor, constant_vector, input_text, image, beam_width=5, max_length=15, topk=200, threshold=0.9):
     # Tokenize input text
     # input_ids = tokenizer.encode(input_text, return_tensors="pt")
     # inputs = llava_processor(input_text, images=image, return_tensors="pt").to('cuda')
@@ -415,6 +433,8 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
     # beam = [(inputs, 0.0)]
 
     dropped = {}
+
+    prelim_seq_len = batch_beams[0][0][0]['input_ids'].shape[-1]
 
     for curr_len in tqdm(range(max_length)):
 
@@ -496,12 +516,133 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
             print(i.shape, j.shape)
         print(len(topk_indices_splits))
 
-        
 
-        # print(topk_indices.shape, topk_logits.shape)
-        # topk_indices = topk_indices.reshape(B, N, -1)
-        # topk_logits = topk_logits.reshape(B, N, -1)
-        # print(topk_indices.shape, topk_logits.shape)
+        for cnt, beam in enumerate(list(batch_beams)):
+            beam_content = batch_beams[beam]
+            all_candidates = []
+            for width, (seq, score) in enumerate(beam_content):
+                token_id = topk_indices_splits[cnt][width, :].unsqueeze(0) # (1,200)
+                token_score = topk_logits_splits[cnt][width, :] # 200 dim list
+
+                new_score = (score * (seq["input_ids"].shape[1] - 1) + token_score) / (seq["input_ids"].shape[1])
+
+                seq_len = seq["input_ids"].shape[1]
+
+                t1 = seq["input_ids"].expand(topk,-1,-1) # seq["input_ids"] len is seq_len, shape = (1,seq_len)
+                t2 = token_id.view(topk,1,1)
+                t3 = torch.cat([t1,t2],dim=-1).squeeze() # (200,seq_len+1)
+
+                print(t3.shape)
+
+                candidates = llava_processor.tokenizer.batch_decode(t3, skip_special_tokens=True)
+                candidates = list(map(lambda x: x.split('ASSISTANT:')[-1].strip(), candidates))
+
+                print('cand', candidates[:10], len(candidates))
+
+
+                clip_inputs = clip_tokenizer(candidates, return_tensors="pt", padding=True)
+
+
+
+                with torch.no_grad():
+                    clip_embeddings = clip_model.get_text_features(input_ids = clip_inputs['input_ids'].to('cuda'), attention_mask = clip_inputs['attention_mask'].to('cuda'))
+
+                print(clip_embeddings.shape)
+
+                
+
+                with torch.no_grad():
+                    target_future_embedding = mlp(clip_embeddings)
+                print(target_future_embedding.shape)
+                cv = constant_vector[cnt,:].unsqueeze(0).expand(topk,-1)
+                similarities_expected = F.cosine_similarity(target_future_embedding, cv, dim=1)
+                similarities_now = F.cosine_similarity(clip_embeddings, cv, dim=1)
+                print(similarities_expected.shape, similarities_now.shape)
+                similarities = 0.9*similarities_expected + 0.1*similarities_now
+                print(similarities_expected[:10], similarities_now[:10], similarities[:10])
+
+                # threshold_mean = 0.9*similarities_expected.mean() + 0.1*similarities_now.mean()
+                # threshold_std = 0.9*similarities_expected.std() + 0.1*similarities_now.std()
+
+                # threshold_expected = similarities_expected.mean() + 3*similarities_expected.std()
+                # threshold_now = similarities_now.mean() + 3*similarities_now.std()
+
+                # threshold = 0.9*threshold_expected + 0.1*threshold_now
+
+                # threshold = threshold_mean + 2*threshold_std
+
+                
+
+                dist1 = torch.sum(torch.pow(target_future_embedding-cv, 2), dim=1)
+                dist2 = torch.sum(torch.pow(clip_embeddings-cv, 2), dim=1)
+
+                dist = (dist1+dist2)/2
+
+                print(dist1[:10], dist2[:10], dist[:10])
+
+                threshold_mean = 0.9*dist1.mean() + 0.1*dist2.mean()
+                threshold_std = 0.9*dist1.std() + 0.1*dist2.std()
+
+                threshold = dist.mean() - 2*dist.std()
+
+                print(threshold.item())
+
+                
+                num_examples = 0
+                for counter, i in enumerate(list(dist.detach().cpu().numpy())):
+                    
+                    if i.item()<=threshold.item():
+                        num_examples +=1
+                
+                print('number of such examples {}'.format(num_examples))
+
+
+                for counter, i in enumerate(list(dist.detach().cpu().numpy())):
+                    
+                    if i.item()<=threshold.item(): # cosine similarity must be positive (>=epsilon)
+                        new_input_ids = t3[counter,:].unsqueeze(0)
+                        attention_mask = torch.ones(new_input_ids.shape, dtype=torch.long).to('cuda')
+                        new_score = (score * (seq_len - 1) + token_score[counter].item()) / (seq_len)
+                        
+                        new_seq = {"input_ids": new_input_ids, "attention_mask": attention_mask, "pixel_values": seq["pixel_values"]}
+                        all_candidates.append((new_seq, new_score))
+                    else:
+                        if (t3[counter,:].unsqueeze(0).shape[1]-prelim_seq_len)==1: # give a chance for first tokens (explore all possibility for the first token)
+                            new_input_ids = t3[counter,:].unsqueeze(0)
+                            attention_mask = torch.ones(new_input_ids.shape, dtype=torch.long).to('cuda')
+                            new_score = (score * (seq_len - 1) + token_score[counter].item()) / (seq_len)
+                            
+                            new_seq = {"input_ids": new_input_ids, "attention_mask": attention_mask, "pixel_values": seq["pixel_values"]}
+                            all_candidates.append((new_seq, new_score))
+                        else:
+                            pass
+
+
+            # Select top beam_width candidates
+            if len(all_candidates)==0:
+                # means for this beam state, none of the continuation is working, so drop the beam state 
+                
+                dropped[beam] = beam_content
+                del batch_beams[beam]
+                continue
+
+            beam_content = sorted(all_candidates, key=lambda x: x[1], reverse=True)[:beam_width]
+
+            # # Check if all sequences are complete
+            # if all(seq["input_ids"][0, -1].item() == llava_processor.tokenizer.eos_token_id for seq, _ in beam_content):
+            #     break
+
+            batch_beams[beam] = beam_content
+
+
+
+
+
+
+
+
+       
+        """
 
 
 
@@ -534,7 +675,7 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
                     new_score = (score * (seq["input_ids"].shape[1] - 1) + token_score) / (seq["input_ids"].shape[1])
                     if satisfies_constraint_or_promising(llava_processor, new_seq, constant_vector[cnt,:], k=50, threshold=threshold):
                         all_candidates.append((new_seq, new_score))
-
+                    print(0/0)
             # Select top beam_width candidates
             if len(all_candidates)==0:
                 # means for this beam state, none of the continuation is working, so drop the beam state 
@@ -550,7 +691,7 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
 
             batch_beams[beam] = beam_content
 
-
+        """
         
     for i in batch_beams:
         b = batch_beams[i]
