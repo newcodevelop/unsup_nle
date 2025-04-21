@@ -1,9 +1,10 @@
 import torch
+from torch import nn
 from transformers import LlavaProcessor, LlavaForConditionalGeneration, CLIPTextModel, CLIPTokenizer
 from PIL import Image
 from scipy.spatial.distance import cosine
 
-
+import argparse
 
 
 parser = argparse.ArgumentParser()
@@ -29,7 +30,7 @@ sys.path.append('/home/dibyanayan/unsup_nle/transformers-research-projects/visua
 
 import torch
 from PIL import Image
-from transformers import AutoImageProcessor, AutoModel
+from transformers import AutoImageProcessor, AutoModel, ViltConfig, ViltForQuestionAnswering, VisualBertForQuestionAnswering, LxmertModel, AutoTokenizer
 
 device = 'cuda'
 
@@ -96,11 +97,11 @@ if args.model.lower()=='lxmert':
             labels=None,
             return_dict=None):
 
-            input_ids = batch['input_ids']
-            visual_feats = batch['visual_feats']
-            visual_pos = batch['visual_pos']
-            attention_mask = batch['attention_mask']
-            token_type_ids = batch['token_type_ids']
+            input_ids = inputs['input_ids']
+            visual_feats = inputs['visual_feats']
+            visual_pos = inputs['visual_pos']
+            attention_mask = inputs['attention_mask']
+            token_type_ids = inputs['token_type_ids']
 
             # labels = batch['labels']
             
@@ -182,9 +183,9 @@ from PIL import Image
 
 import torch
 
-positives_ = torch.load("./positive.pt")
-negatives_ = torch.load("./negative.pt")
-anchors_ = torch.load("./anchor.pt")
+positives_ = torch.load("./{}_vqav2_5000_positive.pt".format(args.model.lower()))
+negatives_ = torch.load("./{}_vqav2_5000_negative.pt".format(args.model.lower()))
+anchors_ = torch.load("./{}_vqav2_5000_anchor.pt".format(args.model.lower()))
 
 import torch
 import torch.nn as nn
@@ -289,7 +290,7 @@ proj_model = train_projector(
     positive_tensor=positives_,
     negative_tensor=negatives_,
     batch_size=8,  # Process 8 examples at a time
-    num_epochs=50
+    num_epochs=5
 )
 
 
@@ -374,12 +375,235 @@ def satisfies_constraint_or_promising(llava_processor, new_seq, constant_vector,
   if dist>=threshold:
     return True
 
+llava_tokenizer = AutoTokenizer.from_pretrained("llava-hf/llava-1.5-7b-hf")
 
 
-def beam_search(llava_model, llava_processor, constant_vector, input_text, image, beam_width=5, max_length=15, topk=200):
+
+
+
+
+
+
+
+def beam_search_1(llava_model, llava_processor, constant_vector, input_text, image, beam_width=4, max_length=5, topk=200, threshold=0.9):
     # Tokenize input text
     # input_ids = tokenizer.encode(input_text, return_tensors="pt")
-    inputs = llava_processor(text=input_text, images=image, return_tensors="pt").to('cuda')
+    # inputs = llava_processor(input_text, images=image, return_tensors="pt").to('cuda')
+    inputs = llava_processor(text=input_text, images=image, padding=True, truncation=True, return_tensors="pt").to('cuda')
+   
+
+    # print('*'*10)
+    # for i in inputs:
+    #     print(inputs[i].shape)
+
+
+    # print(0/0)
+    num_batches = int(inputs['input_ids'].shape[0])
+
+    batch_beams={}
+
+    # Initialize beam with the input sequence and score 0.0
+    for i in range(num_batches):
+        d = {"input_ids": inputs["input_ids"][i,:].unsqueeze(0), "attention_mask": inputs["attention_mask"][i,:].unsqueeze(0), "pixel_values": inputs["pixel_values"][i,:].unsqueeze(0)}
+    
+        # batch_beams[i] = [(d, 0.0)]*beam_width
+        batch_beams[i] = [(d, 0.0)]
+
+
+    # batch_beams = {i: (inp, 0) for i in inputs[o]}
+
+    # beam = [(inputs, 0.0)]
+
+    dropped = {}
+
+    for curr_len in tqdm(range(max_length)):
+
+        batch_seq_all = {'input_ids': [], 'attention_mask': [], 'pixel_values': []}
+
+        dimensions = []
+
+        for cnt, beam in enumerate(list(batch_beams)):
+
+            # cnt can run from 1 to batch_size
+
+            all_candidates = []
+            batch_seq_input_ids = []
+            batch_seq_attn_mask = []
+            batch_seq_pixel_values = []
+
+
+            beam_content = batch_beams[beam]
+
+            
+
+            for seq, score in beam_content:
+                # Check if sequence is complete
+
+                # if seq["input_ids"][0, -1].item() == llava_processor.tokenizer.eos_token_id:
+                #     all_candidates.append((seq, score))
+                #     continue
+
+                batch_seq_input_ids.append(seq["input_ids"])
+                batch_seq_attn_mask.append(seq["attention_mask"])
+                batch_seq_pixel_values.append(seq["pixel_values"])
+
+                
+
+            
+            
+           
+            batch_seq_input_ids = torch.cat(batch_seq_input_ids, dim=0) # bw_cnt, max_len
+            batch_seq_attn_mask = torch.cat(batch_seq_attn_mask, dim=0)
+            batch_seq_pixel_values = torch.cat(batch_seq_pixel_values, dim=0)
+
+            dimensions.append(batch_seq_input_ids.shape[0])
+
+            print(batch_seq_input_ids.shape)
+
+        
+            # batch_seq = {"input_ids":batch_seq_input_ids , "attention_mask": batch_seq_attn_mask, "pixel_values": batch_seq_pixel_values}
+
+            batch_seq_all['input_ids'].append(batch_seq_input_ids) #sizes of [bw1, max_len], [bw2, max_len]; bw1, bw2 are corresponding beam lengths, they might not be the same. bw1!=bw2
+            batch_seq_all['attention_mask'].append(batch_seq_attn_mask)
+            batch_seq_all['pixel_values'].append(batch_seq_pixel_values)
+        
+
+        batch_seq_all['input_ids'] = torch.cat(batch_seq_all['input_ids'], dim=0) # (BS, beam_width, max_len)
+        batch_seq_all['attention_mask'] = torch.cat(batch_seq_all['attention_mask'], dim=0)
+        batch_seq_all['pixel_values'] = torch.cat(batch_seq_all['pixel_values'], dim=0)
+
+        for i in batch_seq_all:
+            print(i, batch_seq_all[i].shape)
+
+        # B, N = batch_seq_all['input_ids'].shape[:2]
+
+        # batch_seq_all['input_ids'] = batch_seq_all['input_ids'].reshape(B * N, -1)
+        # batch_seq_all['attention_mask'] = batch_seq_all['attention_mask'].reshape(B * N, -1)
+        # batch_seq_all['pixel_values'] = batch_seq_all['pixel_values'].reshape(B * N, *batch_seq_all['pixel_values'].shape[2:])
+
+        with torch.no_grad():
+            outputs = llava_model(**batch_seq_all,use_cache=True)
+            logits = outputs.logits[:, -1, :]
+
+        # Get top-k next tokens
+        next_token_logits = torch.log_softmax(logits, dim=-1)
+        topk_logits, topk_indices = torch.topk(next_token_logits, topk)
+
+        topk_indices_splits = list(torch.split(topk_indices, dimensions, dim=0))
+        topk_logits_splits = list(torch.split(topk_logits, dimensions, dim=0))
+
+        for i,j in zip(topk_indices_splits, topk_logits_splits):
+            print(i.shape, j.shape)
+        print(len(topk_indices_splits))
+
+        
+
+        # print(topk_indices.shape, topk_logits.shape)
+        # topk_indices = topk_indices.reshape(B, N, -1)
+        # topk_logits = topk_logits.reshape(B, N, -1)
+        # print(topk_indices.shape, topk_logits.shape)
+
+
+
+        # combine BS, beam width and make inference and then split again
+
+        # for cnt, beam in enumerate(batch_beams):
+        for cnt, beam in enumerate(list(batch_beams)):
+            beam_content = batch_beams[beam]
+            all_candidates = []
+            for width, (seq, score) in enumerate(beam_content):
+                # all_candidates.append((seq, score))
+                # if seq["input_ids"][0, -1].item() == llava_processor.tokenizer.eos_token_id:
+                #     all_candidates.append((seq, score))
+                #     continue
+                
+                for i in range(topk):
+
+                    token_id = topk_indices_splits[cnt][width, i].unsqueeze(0).unsqueeze(0)
+                    token_score = topk_logits_splits[cnt][width, i].item()
+
+                    # token_id = topk_indices[cnt, width, i].unsqueeze(0).unsqueeze(0)
+                    # token_score = topk_logits[cnt, width, i].item()
+                    # Create new sequence by appending the token
+
+                    new_input_ids = torch.cat((seq["input_ids"],torch.tensor([token_id]).unsqueeze(0).to('cuda')),dim=-1)
+                    attention_mask = torch.ones(new_input_ids.shape, dtype=torch.long).to('cuda')
+                    new_seq = {"input_ids": new_input_ids, "attention_mask": attention_mask, "pixel_values": seq["pixel_values"]}
+
+                    # Update score (normalize by length to avoid bias toward shorter sequences)
+                    new_score = (score * (seq["input_ids"].shape[1] - 1) + token_score) / (seq["input_ids"].shape[1])
+                    if satisfies_constraint_or_promising(llava_processor, new_seq, constant_vector[cnt,:], k=50, threshold=threshold):
+                        all_candidates.append((new_seq, new_score))
+
+            # Select top beam_width candidates
+            if len(all_candidates)==0:
+                # means for this beam state, none of the continuation is working, so drop the beam state 
+                del batch_beams[beam]
+                dropped[beam] = all_candidates
+                continue
+
+            beam_content = sorted(all_candidates, key=lambda x: x[1], reverse=True)[:beam_width]
+
+            # # Check if all sequences are complete
+            # if all(seq["input_ids"][0, -1].item() == llava_processor.tokenizer.eos_token_id for seq, _ in beam_content):
+            #     break
+
+            batch_beams[beam] = beam_content
+
+
+        
+    for i in batch_beams:
+        b = batch_beams[i]
+        print(i, llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True))
+    for i in dropped:
+        b = dropped[i]
+        print(i, llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True))
+
+    print(0/0)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+def beam_search(llava_model, llava_processor, constant_vector, input_text, image, beam_width=5, max_length=15, topk=200, threshold=0.9):
+    # Tokenize input text
+    # input_ids = tokenizer.encode(input_text, return_tensors="pt")
+    # inputs = llava_processor(input_text, images=image, return_tensors="pt").to('cuda')
+    inputs = llava_processor(text=input_text, images=image, padding=True, truncation=True, return_tensors="pt").to('cuda')
+   
+
+    # print('*'*10)
+    # for i in inputs:
+    #     print(inputs[i].shape)
+
+
+    # print(0/0)
 
     # Initialize beam with the input sequence and score 0.0
     beam = [(inputs, 0.0)]
@@ -403,12 +627,20 @@ def beam_search(llava_model, llava_processor, constant_vector, input_text, image
 
             # Get logits for next token
             with torch.no_grad():
-                outputs = llava_model(**seq,use_cahce=False)
+                outputs = llava_model(**seq,use_cache=True)
                 logits = outputs.logits[:, -1, :]
 
             # Get top-k next tokens
             next_token_logits = torch.log_softmax(logits, dim=-1)
             topk_logits, topk_indices = torch.topk(next_token_logits, topk)
+
+            print(topk_logits.shape, topk_indices.shape)
+
+            print(topk_indices[:,:10])
+
+            print(0/0)
+
+         
 
             # Create new candidate sequences
             for i in range(topk):
@@ -425,7 +657,7 @@ def beam_search(llava_model, llava_processor, constant_vector, input_text, image
                 # Update score (normalize by length to avoid bias toward shorter sequences)
                 new_score = (score * (seq["input_ids"].shape[1] - 1) + token_score) / (seq["input_ids"].shape[1])
 
-                if satisfies_constraint_or_promising(llava_processor, new_seq, constant_vector, k=50, threshold=0.9):
+                if satisfies_constraint_or_promising(llava_processor, new_seq, constant_vector, k=50, threshold=threshold):
                   all_candidates.append((new_seq, new_score))
 
         # Select top beam_width candidates
@@ -440,12 +672,348 @@ def beam_search(llava_model, llava_processor, constant_vector, input_text, image
     # return llava_processor.tokenizer.batch_decode(best_seq[0]["input_ids"], skip_special_tokens=True)
     return beam
 
+def batched_beam_search(llava_model, llava_processor, constant_vector, input_text, image, 
+                        beam_width=5, max_length=15, topk=200, threshold=0.9, batch_size=8):
+    # Prepare initial inputs
+    inputs = llava_processor(text=input_text, images=image, padding=True, truncation=True, return_tensors="pt").to('cuda')
+    
+    # Initialize beam with the input sequence and score 0.0
+    beam = [(inputs, 0.0)]
+
+    
+
+    for curr_len in tqdm(range(max_length)):
+        all_candidates = []
+        
+        # Check if beam is empty or all sequences complete
+        if not beam or all(seq["input_ids"][0, -1].item() == llava_processor.tokenizer.eos_token_id for seq, _ in beam):
+            break
+            
+        # Separate complete and incomplete sequences
+        complete_candidates = [(seq, score) for seq, score in beam 
+                              if seq["input_ids"][0, -1].item() == llava_processor.tokenizer.eos_token_id]
+        
+     
+        incomplete_sequences = [(seq, score) for seq, score in beam 
+                               if seq["input_ids"][0, -1].item() != llava_processor.tokenizer.eos_token_id]
+
+        
+        # Process all incomplete sequences in batches
+        for batch_start in range(0, len(incomplete_sequences), batch_size):
+            batch_end = min(batch_start + batch_size, len(incomplete_sequences))
+            batch = incomplete_sequences[batch_start:batch_end]
+            
+            # Prepare batch inputs
+            batch_input_ids = torch.cat([seq["input_ids"] for seq, _ in batch], dim=0)
+            batch_attention_mask = torch.cat([seq["attention_mask"] for seq, _ in batch], dim=0)
+            batch_pixel_values = torch.cat([seq["pixel_values"] for seq, _ in batch], dim=0)
+            
+            batch_inputs = {
+                "input_ids": batch_input_ids,
+                "attention_mask": batch_attention_mask,
+                "pixel_values": batch_pixel_values
+            }
+            
+            # Get logits for next tokens in batch
+            with torch.no_grad():
+                outputs = llava_model(**batch_inputs, use_cache=False)
+                batch_logits = outputs.logits[:, -1, :]
+            
+            # Process each sequence in the batch
+             
+            for i, (seq, score) in enumerate(batch):
+                logits = batch_logits[i].unsqueeze(0)  # Add batch dimension back
+                
+                # Get top-k next tokens
+                next_token_logits = torch.log_softmax(logits, dim=-1)
+                topk_logits, topk_indices = torch.topk(next_token_logits, topk)
+                print([topk_indices[0, j].item() for j in range(10)])
+                
+                # Create new candidate sequences
+                for j in range(topk):
+                    token_id = topk_indices[0, j].item()
+                    token_score = topk_logits[0, j].item()
+                    
+                    # Create new sequence by appending the token
+                    print(seq["input_ids"])
+                    print(seq["input_ids"].shape)
+                    print(torch.tensor([[token_id]]).shape)
+                    new_input_ids = torch.cat([seq["input_ids"], 
+                                              torch.tensor([[token_id]], device='cuda')], dim=1)
+                    attention_mask = torch.ones(new_input_ids.shape, dtype=torch.long, device='cuda')
+                    
+                    new_seq = {
+                        "input_ids": new_input_ids,
+                        "attention_mask": attention_mask,
+                        "pixel_values": seq["pixel_values"]
+                    }
+                    
+                    # Update score (normalize by length to avoid bias toward shorter sequences)
+                    new_score = (score * (seq["input_ids"].shape[1] - 1) + token_score) / new_input_ids.shape[1]
+                    
+                    # Check constraint
+                    if satisfies_constraint_or_promising(llava_processor, new_seq, constant_vector, k=50, threshold=threshold):
+                        all_candidates.append((new_seq, new_score))
+        
+        # Add complete candidates back
+        all_candidates.extend(complete_candidates)
+        
+        # Select top beam_width candidates
+        beam = sorted(all_candidates, key=lambda x: x[1], reverse=True)[:beam_width]
+
+    return beam
+
+
+
+
+
+
+
+
+
+
+
+# def batched_beam_search(llava_model, llava_processor, constant_vector, input_text, image, 
+#                         beam_width=5, max_length=15, topk=200, threshold=0.9, batch_size=8):
+#     # Prepare initial inputs
+#     inputs = llava_processor(text=input_text, images=image, padding=True, truncation=True, return_tensors="pt").to('cuda')
+    
+#     # Get the initial batch size
+#     initial_batch_size = inputs["input_ids"].shape[0]
+    
+#     # Initialize beam for each batch item
+#     beams = []
+#     for i in range(initial_batch_size):
+#         # Extract the i-th item from the batch while preserving the batch dimension
+#         single_item = {}
+#         for key, value in inputs.items():
+#             if isinstance(value, torch.Tensor):
+#                 single_item[key] = value[i:i+1]  # Keep batch dimension
+#             else:
+#                 single_item[key] = value
+        
+#         # Initialize beam for this batch item
+#         beams.append([(single_item, 0.0)])
+    
+#     for curr_len in tqdm(range(max_length)):
+#         # Check if all beams are complete
+#         all_complete = True
+#         for beam in beams:
+#             if not all(seq_dict["input_ids"][0, -1].item() == llava_processor.tokenizer.eos_token_id for seq_dict, _ in beam):
+#                 all_complete = False
+#                 break
+        
+#         if all_complete:
+#             break
+        
+#         # Collect all sequences from all beams that need processing
+#         all_sequences = []
+#         sequence_origins = []  # Track which beam each sequence came from
+        
+#         for batch_idx, beam in enumerate(beams):
+#             for seq_dict, score in beam:
+#                 if seq_dict["input_ids"][0, -1].item() != llava_processor.tokenizer.eos_token_id:
+#                     all_sequences.append((seq_dict, score))
+#                     sequence_origins.append(batch_idx)
+        
+#         # Process sequences in batches
+#         new_candidates_by_beam = [[] for _ in range(initial_batch_size)]
+        
+#         for batch_start in range(0, len(all_sequences), batch_size):
+#             batch_end = min(batch_start + batch_size, len(all_sequences))
+#             batch_sequences = all_sequences[batch_start:batch_end]
+#             batch_origins = sequence_origins[batch_start:batch_end]
+            
+#             # Prepare batch inputs
+#             batch_inputs = {
+#                 "input_ids": torch.cat([seq["input_ids"] for seq, _ in batch_sequences], dim=0),
+#                 "attention_mask": torch.cat([seq["attention_mask"] for seq, _ in batch_sequences], dim=0),
+#                 "pixel_values": torch.cat([seq["pixel_values"] for seq, _ in batch_sequences], dim=0)
+#             }
+            
+
+#             # Get logits for all sequences in one forward pass
+#             with torch.no_grad():
+#                 outputs = llava_model(**batch_inputs, use_cache=False)
+#                 batch_logits = outputs.logits[:, -1, :]  # Shape: [batch_size, vocab_size]
+            
+#             # Process each sequence's logits
+#             for i, ((seq_dict, score), beam_idx) in enumerate(zip(batch_sequences, batch_origins)):
+#                 logits = batch_logits[i].unsqueeze(0)  # Add batch dimension back
+                
+#                 # Get top-k next tokens
+#                 next_token_logits = torch.log_softmax(logits, dim=-1)
+#                 topk_logits, topk_indices = torch.topk(next_token_logits, topk)
+#                 print([topk_indices[0, j].item() for j in range(10)])
+                    
+
+                
+#                 # Create candidates for this sequence
+#                 for j in range(topk):
+#                     token_id = topk_indices[0, j].item()
+#                     token_score = topk_logits[0, j].item()
+                    
+#                     # Create new sequence
+#                     new_input_ids = torch.cat([
+#                         seq_dict["input_ids"],
+#                         torch.tensor([[token_id]], device='cuda')
+#                     ], dim=1)
+                    
+#                     new_attention_mask = torch.ones_like(new_input_ids)
+                    
+#                     new_seq_dict = {
+#                         "input_ids": new_input_ids,
+#                         "attention_mask": new_attention_mask,
+#                         "pixel_values": seq_dict["pixel_values"]
+#                     }
+                    
+#                     for i in new_seq_dict:
+#                         print(new_seq_dict[i].shape)
+#                     # Update score
+#                     new_score = (score * (seq_dict["input_ids"].shape[1] - 1) + token_score) / new_input_ids.shape[1]
+                    
+#                     # Check constraint
+#                     if satisfies_constraint_or_promising(llava_processor, new_seq_dict, constant_vector, threshold):
+#                         new_candidates_by_beam[beam_idx].append((new_seq_dict, new_score))
+        
+#         # Update all beams with new candidates
+#         for batch_idx in range(initial_batch_size):
+#             # Get complete sequences from current beam
+#             complete_candidates = [(seq_dict, score) for seq_dict, score in beams[batch_idx] 
+#                                   if seq_dict["input_ids"][0, -1].item() == llava_processor.tokenizer.eos_token_id]
+            
+#             # Combine with new candidates
+#             all_candidates = complete_candidates + new_candidates_by_beam[batch_idx]
+            
+#             # Update beam with top candidates
+#             beams[batch_idx] = sorted(all_candidates, key=lambda x: x[1], reverse=True)[:beam_width]
+    
+#     # Return the best sequence for each batch item
+#     results = []
+#     for batch_idx in range(initial_batch_size):
+#         results.append(beams[batch_idx][0] if beams[batch_idx] else None)
+    
+#     return results
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+dataloader = torch.utils.data.DataLoader(dataset, batch_size=50, shuffle=False)
+
+
+from PIL import Image
+import os
+import torch
+from torch.utils.data import DataLoader
+from torchvision import transforms
+from transformers import AutoTokenizer
+
+
+
+
+
+BATCH_SIZE = 16  # Change as needed
+
+def collate_fn(batch):
+    texts = [i['question'] for i in batch]
+    image_paths = [
+        os.path.join("../val2014/", i['image_id'].split('::')[0].split('://')[-1].split('/')[-1])
+        for i in batch
+    ]
+    images = [Image.open(path).convert("RGB") for path in image_paths]
+
+    visual_feats = []
+    visual_boxes = []
+
+    for path in image_paths:
+        feats, boxes = get_visual_embedding(path)
+        visual_feats.append(feats)
+        visual_boxes.append(boxes)
+
+    # Stack visual features and boxes
+    visual_feats = torch.stack(visual_feats).to('cuda')  # shape: [B, num_boxes, feat_dim]
+    visual_boxes = torch.stack(visual_boxes).to('cuda')  # shape: [B, num_boxes, 4]
+
+    # Tokenize text with padding
+    encoding = tokenizer(texts, return_tensors='pt', padding=True, truncation=True)
+    encoding = {k: v.to('cuda') for k, v in encoding.items()}
+
+    return {
+        **encoding,
+        "visual_feats": visual_feats.squeeze(),
+        "visual_pos": visual_boxes.squeeze()
+       
+        
+    }, { "image_paths": image_paths, "texts": texts,
+        "images": images}
+
+dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
+
+for batch in dataloader:
+    print(batch)
+    inputs = batch[0]
+    for i in inputs:
+        print(inputs[i].shape)
+    with torch.no_grad():
+        pred_lab, pooled_output = model(**inputs)
+    print(batch[1])
+    print(pred_lab, pooled_output.shape)
+    pooled_output = pooled_output.squeeze()
+
+    prefix_sets = []
+
+    for idx,txt in zip(pred_lab.squeeze().detach().cpu().numpy(), batch[1]['texts']):
+
+        prefix = f"USER: <image>\nGiven the input (a question and an image) and the generated answer, generate an explanation behind the answer.\n Question: {txt} Answer: {config.id2label[idx]}. Explanation: Because\nASSISTANT:"
+        prefix_sets.append(prefix)
+
+    # print("Predicted answer:", model.config.id2label[idx])
+    print('prefix', prefix_sets)
+    with torch.no_grad():
+        proj_model.eval()
+        constant_vector = proj_model(pooled_output.to('cuda'))
+    
+    print(constant_vector.shape)
+
+    b = beam_search_1(llava_model, llava_processor, constant_vector, prefix_sets, batch[1]['images'], threshold=0.92)
+
+    # b = batched_beam_search(llava_model, llava_processor, constant_vector, prefix_sets, batch[1]['images'], threshold=0.9)
+    break
+
+print(0/0)
+
+
+
 
 for p, i in enumerate(dataset):
     text = i['question']
     kk = i['image_id'].split('::')[0].split('://')[-1].split('/')[-1]
     # url = "http://images.cocodataset.org/val2014/COCO_val2014_000000262148.jpg"
     img_path = os.path.join("../val2014/", kk)
+
+    
+
+    image = Image.open(img_path)
+    
 
     # image = Image.open(requests.get(image_path, stream=True).raw)
     visual_embeds, normalized_boxes = get_visual_embedding(img_path)
@@ -455,18 +1023,72 @@ for p, i in enumerate(dataset):
     # image = image.open(image_path)
     # encoding = processor(image, text, return_tensors="pt")
 
-    inputs = tokenizer(text)
+    inputs = tokenizer(text, return_tensors='pt')
+    inputs['input_ids'] = inputs['input_ids'].to('cuda')
+    inputs['attention_mask'] = inputs['attention_mask'].to('cuda')
+    inputs['token_type_ids'] = inputs['token_type_ids'].to('cuda')
+    print(inputs)
     if args.model.lower()=='lxmert':
             
         inputs.update({
-            "visual_feats": torch.squeeze(visual_embeds),
-            "visual_pos": torch.squeeze(normalized_boxes),
-            "image_path": image_path,
+            "visual_feats": visual_embeds.to('cuda'),
+            "visual_pos": normalized_boxes.to('cuda'),
+            "image_path": img_path,
             })
-        with torch.no_grad():
-            pred_lab, pooled_output = model(batch)
 
-        print('lxmert pooled', pooled_output.shape)
+        # for i in inputs:
+        #     print(i, inputs[i].shape)
+
+        with torch.no_grad():
+            pred_lab, pooled_output = model(inputs)
+
+        idx = pred_lab[0].item()
+
+
+        # cf_prefix = f"USER: <image>\nGiven the input (a question and an image) and the generated answer, change the question minimally in such a way that the generated answer should change. In one word, generate a counterfactual question by adding an adjective or adverb. \n Question: {text} Answer: {config.id2label[idx]}.\nASSISTANT:"
+
+
+        # llava_inputs = llava_processor(text=cf_prefix, images=image, return_tensors="pt").to('cuda')
+
+        # kk = llava_model.generate(**llava_inputs)
+
+        # print('kk',llava_processor.batch_decode(kk, skip_special_tokens=True))
+
+
+
+        prefix = f"USER: <image>\nGiven the input (a question and an image) and the generated answer, generate an explanation behind the answer.\n Question: {text} Answer: {config.id2label[idx]}. Explanation: Because\nASSISTANT:"
+
+        # print("Predicted answer:", model.config.id2label[idx])
+        print('prefix', prefix)
+        with torch.no_grad():
+            proj_model.eval()
+            constant_vector = proj_model(pooled_output.squeeze(dim=1).to('cuda'))
+
+        faithful = {0.92: [], 0.93:[], 0.94:[]}
+
+        for threshold in faithful:
+            b = batched_beam_search(llava_model, llava_processor, constant_vector, prefix, image, threshold=threshold) #generate a faithful explanation
+            print(llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True))
+            print(0/0)
+            gen_faithful_exp = llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True)
+            faithful[threshold].append(gen_faithful_exp)
+
+        b = beam_search(llava_model, llava_processor, constant_vector, prefix, image, threshold=0.0) #generate a plausible explanation
+        gen_plausible_exp = llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True)
+        
+        print("Plausible {}".format(gen_plausible_exp))
+
+        print(faithful)
+
+        # print(f'At current length of the beam composition is')
+        # for i in b:
+        #     print(llava_processor.tokenizer.batch_decode(i[0]['input_ids'], skip_special_tokens=True), i[1])
+
+        # print('*****')
+
+        # print('lxmert pooled', pooled_output.shape)
+
+
     elif args.model.lower()=='visualbert':
 
         visual_token_type_ids = torch.ones(visual_embeds.shape[:-1], dtype=torch.long)
