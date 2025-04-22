@@ -194,6 +194,8 @@ from torch.utils.data import DataLoader, TensorDataset
 import torch.nn.functional as F
 
 # Define the projection model
+
+"""
 class Projector(nn.Module):
     def __init__(self, input_dim=768, output_dim=512):
         super(Projector, self).__init__()
@@ -207,28 +209,56 @@ class Projector(nn.Module):
     def forward(self, x):
         return self.projection(x)
 
-# Define the triplet loss
-class TripletLoss():
-    def __init__(self, margin=1.0):
-        super(TripletLoss, self).__init__()
-        self.margin = margin
 
-    def calc_loss(self, anchor, positive, negative):
-        # Calculate distances
-        pos_dist = torch.sum(torch.pow(anchor - positive, 2), dim=1)
-        neg_dist = torch.sum(torch.pow(anchor - negative, 2), dim=1)
+class DisentangleProjectorQ(nn.Module):
+    
+    def __init__(self, input_dim, embed_dim=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
 
-        # print(anchor.shape, positive.shape)
-        # print(0/0)
-        # F.cosine_similarity(anchor, positive, dim=1)
+    def forward(self, x):
+        return self.net(x)
 
-        # Compute triplet loss
-        loss = torch.clamp(pos_dist - neg_dist + self.margin, min=0.0)
-        return torch.mean(loss)
+
+def train_Q(x_concepts, y_concepts, batch_size=32, num_epochs=40):
+    dataset = TensorDataset(x_concepts, y_concepts)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    input_dim = x_concepts.shape[1]
+    model_Q = DisentangleProjectorQ(input_dim, 256).to(device)
+    optimizer = optim.Adam(model_Q.parameters(), lr=0.0001)
+    margin = 1
+    for epoch in range(num_epochs):
+        total_loss = 0
+        for batch_positive, batch_negative in loader:
+            q_x = F.normalize(model_Q(batch_positive.to('cuda')), dim=1)
+            q_y = F.normalize(model_Q(batch_negative.to('cuda')), dim=1)
+            # Distance between each paired rep
+            dist = torch.norm(q_x - q_y, dim=1)
+            # Triplet-like: enforce dist >= margin
+            loss = F.relu(margin - dist).mean()
+            
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            total_loss += loss.item()
+        print(f"[Q] Epoch {epoch+1}/{num_epochs}, Loss: {total_loss/len(loader):.4f}")
+
+    return model_Q
+
+model_Q = train_Q(positives_, negatives_)
 
 # Function to train the model
-def train_projector(anchor_tensor, positive_tensor, negative_tensor, batch_size=8, num_epochs=100):
+def train_projector(model_Q, anchor_tensor, positive_tensor, negative_tensor, batch_size=8, num_epochs=100):
     # Create dataset and dataloader
+
+
+    
     dataset = TensorDataset(anchor_tensor, positive_tensor, negative_tensor)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
 
@@ -237,8 +267,8 @@ def train_projector(anchor_tensor, positive_tensor, negative_tensor, batch_size=
     output_dim = positive_tensor.shape[1]
 
     # Initialize the model, loss function, and optimizer
-    proj_model = Projector(input_dim=input_dim, output_dim=output_dim).to('cuda')
-    triplet_loss = TripletLoss(margin=1.0)
+    proj_model = Projector(input_dim=input_dim, output_dim=256).to('cuda')
+    # triplet_loss = TripletLoss(margin=1.0)
     optimizer = optim.Adam(proj_model.parameters(), lr=0.00001)
 
     # Training loop
@@ -254,22 +284,42 @@ def train_projector(anchor_tensor, positive_tensor, negative_tensor, batch_size=
             # Compute loss
 
             # print(projected_anchor.shape, batch_positive.shape)
+            positive = F.normalize(model_Q(batch_positive.to('cuda').cuda()), dim=1) # positive and negative centroids in this space is linearly separable.
+            negative = F.normalize(model_Q(batch_negative.to('cuda').cuda()), dim=1)
 
-            pos_cossim = F.cosine_similarity(projected_anchor, batch_positive.to('cuda'), dim=1).mean()
-            neg_cossim = F.cosine_similarity(projected_anchor, batch_negative.to('cuda'), dim=1).mean()
+           
+
+
+            anchor = F.normalize(projected_anchor, p=2, dim=1)
+            # positive = F.normalize(batch_positive.to('cuda'), p=2, dim=1)
+            # negative = F.normalize(batch_negative.to('cuda'), p=2, dim=1)
+
+
+            # pos_cossim = F.cosine_similarity(projected_anchor, batch_positive.to('cuda'), dim=1).mean()
+            # neg_cossim = F.cosine_similarity(projected_anchor, batch_negative.to('cuda'), dim=1).mean()
+
+            pos_cossim = F.cosine_similarity(projected_anchor, positive, dim=1).mean()
+            neg_cossim = F.cosine_similarity(projected_anchor, negative, dim=1).mean()
 
             # print(pos_cossim,neg_cossim)
 
             # print(0/0)
 
-            pos_dist = torch.sum(torch.pow(projected_anchor - batch_positive.to('cuda'), 2), dim=1)
-            neg_dist = torch.sum(torch.pow(projected_anchor - batch_negative.to('cuda'), 2), dim=1)
+            pos_dist = torch.sum(torch.pow(projected_anchor -  positive, 2), dim=1)
+            neg_dist = torch.sum(torch.pow(projected_anchor - negative, 2), dim=1)
 
             # Compute triplet loss
-            loss = torch.clamp(pos_dist - neg_dist + 1.0, min=0.0) 
+            loss = torch.clamp(pos_dist - neg_dist + 2.0, min=0.0) 
             loss_cossim = 0.5*(pos_cossim - neg_cossim)
             # loss_cossim = (pos_cossim - neg_cossim)
-            loss = torch.mean(loss) + loss_cossim
+            
+
+            pos_centroid = torch.mean(positive, dim=0)
+            neg_centroid = torch.mean(negative, dim=0)
+
+            centroid_loss = -torch.norm(pos_centroid - neg_centroid, p=2)
+
+            loss = torch.mean(loss)
             # loss += loss_cossim
             # loss = (pos_cossim - neg_cossim)
 
@@ -295,7 +345,7 @@ def train_projector(anchor_tensor, positive_tensor, negative_tensor, batch_size=
 
 
 # Function to train the model
-def test_projector(proj_model, anchor_tensor, positive_tensor, negative_tensor, batch_size=8):
+def test_projector(model_Q, proj_model, anchor_tensor, positive_tensor, negative_tensor, batch_size=8):
     # Create dataset and dataloader
     dataset = TensorDataset(anchor_tensor, positive_tensor, negative_tensor)
     dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
@@ -323,15 +373,21 @@ def test_projector(proj_model, anchor_tensor, positive_tensor, negative_tensor, 
 
         # print(projected_anchor.shape, batch_positive.shape)
 
-        pos_cossim = F.cosine_similarity(projected_anchor, batch_positive.to('cuda'), dim=1).mean()
-        neg_cossim = F.cosine_similarity(projected_anchor, batch_negative.to('cuda'), dim=1).mean()
+        
+        anchor = F.normalize(projected_anchor, p=2, dim=1)
+        positive = F.normalize(model_Q(batch_positive.to('cuda').cuda()), dim=1) # positive and negative centroids in this space is linearly separable.
+        negative = F.normalize(model_Q(batch_negative.to('cuda').cuda()), dim=1)
+
+
+        pos_cossim = F.cosine_similarity(projected_anchor, positive, dim=1).mean()
+        neg_cossim = F.cosine_similarity(projected_anchor, negative, dim=1).mean()
 
         # print(pos_cossim,neg_cossim)
 
         # print(0/0)
 
-        pos_dist = torch.sum(torch.pow(projected_anchor - batch_positive.to('cuda'), 2), dim=1)
-        neg_dist = torch.sum(torch.pow(projected_anchor - batch_negative.to('cuda'), 2), dim=1)
+        pos_dist = torch.sum(torch.pow(projected_anchor - positive, 2), dim=1)
+        neg_dist = torch.sum(torch.pow(projected_anchor - negative, 2), dim=1)
 
         dist_pos.append(pos_dist)
         dist_neg.append(neg_dist)
@@ -352,6 +408,7 @@ batch_size = 20  # This can be any number
 
 # Train the model
 proj_model = train_projector(
+    model_Q,
     anchor_tensor=anchors_,
     positive_tensor=positives_,
     negative_tensor=negatives_,
@@ -362,6 +419,7 @@ proj_model = train_projector(
 
 
 dist_pos, dist_neg = test_projector(
+    model_Q,
     proj_model,
     anchor_tensor=anchors_,
     positive_tensor=positives_,
@@ -381,6 +439,178 @@ beta  = torch.quantile(dist_neg, 0.05)   #  5th percentile
 print(alpha, beta)
 
 print(0/0)
+"""
+
+
+
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+from torch.utils.data import DataLoader, TensorDataset
+
+# -----------------------------
+# Model Definitions
+# -----------------------------
+
+class DisentangleProjectorQ(nn.Module):
+    """
+    Projects concept centroids into a latent space for pairwise separation.
+    """
+    def __init__(self, input_dim, embed_dim=256):
+        super().__init__()
+        self.net = nn.Sequential(
+            nn.Linear(input_dim, embed_dim),
+            nn.ReLU(),
+            nn.Linear(embed_dim, embed_dim)
+        )
+
+    def forward(self, x):
+        return self.net(x)
+
+class ProjectorF(nn.Module):
+    """
+    Projects anchor representations into the same latent space.
+    """
+    def __init__(self, input_dim, embed_dim=256):
+        super().__init__()
+        self.linear = nn.Linear(input_dim, embed_dim)
+
+    def forward(self, x):
+        return self.linear(x)
+
+# -----------------------------
+# Stage 1: Train Q on paired concept centroids
+# -----------------------------
+
+def train_Q(concepts_X, concepts_Y,
+            embed_dim=256, margin=1.0,
+            batch_size=16, num_epochs=50,
+            lr=1e-4, device='cuda'):
+    """
+    Train Q so that for each pair (x_i, y_i):
+      ||Q(x_i) - Q(y_i)|| >= margin
+
+    Returns trained Q.
+    """
+    dataset = TensorDataset(concepts_X, concepts_Y)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    model_Q = DisentangleProjectorQ(concepts_X.size(1), embed_dim).to(device)
+    optimizer = optim.Adam(model_Q.parameters(), lr=lr)
+
+    for epoch in range(1, num_epochs+1):
+        epoch_loss = 0.0
+        epoch_dist = 0.0
+        for x_batch, y_batch in loader:
+            x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+
+            q_x = F.normalize(model_Q(x_batch), dim=1)
+            q_y = F.normalize(model_Q(y_batch), dim=1)
+            dist = torch.norm(q_x - q_y, dim=1)
+
+            # enforce dist >= margin per pair
+            loss = F.relu(margin - dist).mean()
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+            epoch_dist += dist.mean().item()
+
+        print(f"[Q] Epoch {epoch}/{num_epochs} | Loss: {epoch_loss/len(loader):.4f}" \
+              f" | Mean pairwise dist: {epoch_dist/len(loader):.4f}")
+
+    return model_Q
+
+# -----------------------------
+# Stage 2: Train F on anchors with paired concept prototypes
+# -----------------------------
+
+def train_F(anchors, concepts_X, concepts_Y, model_Q,
+            embed_dim=256, margin=0.5,
+            batch_size=32, num_epochs=50,
+            lr=1e-5, device='cuda'):
+    """
+    For each example i, trains F so that:
+      ||F(anchor_i) - Q(x_i)|| <= ||F(anchor_i) - Q(y_i)|| - margin
+    using triplet-like loss.
+
+    anchors: Tensor [N, d_anchor]
+    concepts_X, concepts_Y: paired Tensors [N, d_concept]
+    model_Q: trained DisentangleProjectorQ
+    """
+    dataset = TensorDataset(anchors, concepts_X, concepts_Y)
+    loader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    model_F = ProjectorF(anchors.size(1), embed_dim).to(device)
+    optimizer = optim.Adam(model_F.parameters(), lr=lr)
+
+    for epoch in range(1, num_epochs+1):
+        epoch_loss = 0.0
+        for a_batch, x_batch, y_batch in loader:
+            a_batch = a_batch.to(device)
+            x_batch = x_batch.to(device)
+            y_batch = y_batch.to(device)
+
+            # forward
+            f_a = F.normalize(model_F(a_batch), dim=1)
+            with torch.no_grad():
+                q_x = F.normalize(model_Q(x_batch), dim=1)
+                q_y = F.normalize(model_Q(y_batch), dim=1)
+
+            pos_dist = torch.norm(f_a - q_x, dim=1)
+            neg_dist = torch.norm(f_a - q_y, dim=1)
+
+            # triplet loss: want pos_dist + margin <= neg_dist
+            loss = F.relu(pos_dist - neg_dist + margin).mean()
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+
+            epoch_loss += loss.item()
+
+        print(f"[F] Epoch {epoch}/{num_epochs} | Triplet Loss: {epoch_loss/len(loader):.4f}")
+
+    return model_F
+
+# -----------------------------
+# Usage Example
+# -----------------------------
+model_Q = train_Q(positives_, negatives_)
+proj_F  = train_F(anchors_, positives_, negatives_, model_Q)
+
+# After training, evaluate pairwise distances:
+with torch.no_grad():
+    f_out = F.normalize(proj_F(anchors_.to(device)), dim=1)
+    q_x  = F.normalize(model_Q(positives_.to(device)), dim=1)
+    q_y  = F.normalize(model_Q(negatives_.to(device)), dim=1)
+    d_pos = torch.norm(f_out - q_x, dim=1)
+    d_neg = torch.norm(f_out - q_y, dim=1)
+print('Mean pos dist:', d_pos.mean().item(), 'Mean neg dist:', d_neg.mean().item())
+
+
+
+alpha = torch.quantile(d_pos, 0.95)  # 95th percentile
+beta  = torch.quantile(d_neg, 0.05)   #  5th percentile
+
+print(alpha, beta)
+
+threshold = (beta-alpha)/2
+
+threshold = threshold.item()
+
+
+
+
+
+
+
 
 
 
@@ -627,11 +857,11 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
                     target_future_embedding = mlp(clip_embeddings)
                 print(target_future_embedding.shape)
                 cv = constant_vector[cnt,:].unsqueeze(0).expand(topk,-1)
-                similarities_expected = F.cosine_similarity(target_future_embedding, cv, dim=1)
-                similarities_now = F.cosine_similarity(clip_embeddings, cv, dim=1)
-                print(similarities_expected.shape, similarities_now.shape)
-                similarities = 0.9*similarities_expected + 0.1*similarities_now
-                print(similarities_expected[:10], similarities_now[:10], similarities[:10])
+                # similarities_expected = F.cosine_similarity(target_future_embedding, cv, dim=1)
+                # similarities_now = F.cosine_similarity(clip_embeddings, cv, dim=1)
+                # print(similarities_expected.shape, similarities_now.shape)
+                # similarities = 0.9*similarities_expected + 0.1*similarities_now
+                # print(similarities_expected[:10], similarities_now[:10], similarities[:10])
 
                 # threshold_mean = 0.9*similarities_expected.mean() + 0.1*similarities_now.mean()
                 # threshold_std = 0.9*similarities_expected.std() + 0.1*similarities_now.std()
@@ -643,14 +873,26 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
 
                 # threshold = threshold_mean + 2*threshold_std
 
+                target_future_embedding = F.normalize(model_Q(target_future_embedding.to(device)), dim=1)
+                clip_embeddings = F.normalize(model_Q(clip_embeddings.to(device)), dim=1)
+
+                print(cv.shape,target_future_embedding.shape, clip_embeddings.shape )
+
+                dist1 = torch.norm(cv - target_future_embedding, dim=1)
+                dist2 = torch.norm(cv - clip_embeddings, dim=1)
+
+
+
                 
 
-                dist1 = torch.sum(torch.pow(target_future_embedding-cv, 2), dim=1)
-                dist2 = torch.sum(torch.pow(clip_embeddings-cv, 2), dim=1)
 
                 dist = (dist1+dist2)/2
 
-                # print(dist1[:10], dist2[:10], dist[:10])
+                
+
+                print(dist1[:10], dist2[:10], dist[:10], threshold)
+
+               
 
                 # threshold_mean = 0.9*dist1.mean() + 0.1*dist2.mean()
                 # threshold_std = 0.9*dist1.std() + 0.1*dist2.std()
@@ -661,9 +903,9 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
 
                 dist_sorted, indices_sort = dist.sort(dim=-1)
 
-                print(dist[:10], dist_sorted[:10])
+                # print(dist[:10], dist_sorted[:10])
 
-                # percentage = 0.1 #only select top 10% of the topk tokens based on their closeness to the projected multimodal embedding (the constraint)
+                # # percentage = 0.1 #only select top 10% of the topk tokens based on their closeness to the projected multimodal embedding (the constraint)
                 percentage = 0.2
                 num_vals = int(percentage*topk)-1
 
@@ -1218,12 +1460,13 @@ for batch in dataloader:
     # print("Predicted answer:", model.config.id2label[idx])
     print('prefix', prefix_sets)
     with torch.no_grad():
-        proj_model.eval()
-        constant_vector = proj_model(pooled_output.to('cuda'))
+        proj_F.eval()
+        f_out = F.normalize(proj_F(pooled_output.to('cuda')), dim=1)
+        
     
-    print(constant_vector.shape)
+    print(f_out.shape)
 
-    b = beam_search_1(llava_model, llava_processor, constant_vector, prefix_sets, batch[1]['images'], threshold=0.92)
+    b = beam_search_1(llava_model, llava_processor, f_out, prefix_sets, batch[1]['images'], threshold=0.92)
 
     # b = batched_beam_search(llava_model, llava_processor, constant_vector, prefix_sets, batch[1]['images'], threshold=0.9)
     break
