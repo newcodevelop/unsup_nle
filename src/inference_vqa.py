@@ -292,6 +292,55 @@ def train_projector(anchor_tensor, positive_tensor, negative_tensor, batch_size=
 
     return proj_model
 
+
+
+# Function to train the model
+def test_projector(proj_model, anchor_tensor, positive_tensor, negative_tensor, batch_size=8):
+    # Create dataset and dataloader
+    dataset = TensorDataset(anchor_tensor, positive_tensor, negative_tensor)
+    dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True)
+
+    # Get dimensions from the data
+    input_dim = anchor_tensor.shape[1]
+    output_dim = positive_tensor.shape[1]
+
+    # # Initialize the model, loss function, and optimizer
+    # proj_model = Projector(input_dim=input_dim, output_dim=output_dim).to('cuda')
+    # triplet_loss = TripletLoss(margin=1.0)
+    # optimizer = optim.Adam(proj_model.parameters(), lr=0.00001)
+    dist_pos = []
+    dist_neg = []
+
+    proj_model.eval()
+   
+
+    for batch_anchor, batch_positive, batch_negative in dataloader:
+        # Forward pass
+
+        projected_anchor = proj_model(batch_anchor.to('cuda'))
+
+        # Compute loss
+
+        # print(projected_anchor.shape, batch_positive.shape)
+
+        pos_cossim = F.cosine_similarity(projected_anchor, batch_positive.to('cuda'), dim=1).mean()
+        neg_cossim = F.cosine_similarity(projected_anchor, batch_negative.to('cuda'), dim=1).mean()
+
+        # print(pos_cossim,neg_cossim)
+
+        # print(0/0)
+
+        pos_dist = torch.sum(torch.pow(projected_anchor - batch_positive.to('cuda'), 2), dim=1)
+        neg_dist = torch.sum(torch.pow(projected_anchor - batch_negative.to('cuda'), 2), dim=1)
+
+        dist_pos.append(pos_dist)
+        dist_neg.append(neg_dist)
+
+           
+
+
+    return torch.stack(dist_pos).flatten(), torch.stack(dist_neg).flatten()
+
 # Example usage
 
 # Sample data - in a real scenario, these would be your actual tensors
@@ -309,6 +358,29 @@ proj_model = train_projector(
     batch_size=8,  # Process 8 examples at a time
     num_epochs=50
 )
+
+
+
+dist_pos, dist_neg = test_projector(
+    proj_model,
+    anchor_tensor=anchors_,
+    positive_tensor=positives_,
+    negative_tensor=negatives_,
+    batch_size=8,  # Process 8 examples at a time
+)
+
+
+
+print(dist_pos.shape, dist_neg.shape)
+
+
+# 1) using torch.quantile (PyTorch ≥1.7)
+alpha = torch.quantile(dist_pos, 0.95)  # 95th percentile
+beta  = torch.quantile(dist_neg, 0.05)   #  5th percentile
+
+print(alpha, beta)
+
+print(0/0)
 
 
 
@@ -403,7 +475,7 @@ llava_tokenizer = AutoTokenizer.from_pretrained("llava-hf/llava-1.5-7b-hf")
 
 
 
-def beam_search_1(llava_model, llava_processor, constant_vector, input_text, image, beam_width=5, max_length=15, topk=200, threshold=0.9):
+def beam_search_1(llava_model, llava_processor, constant_vector, input_text, image, beam_width=4, max_length=20, topk=800, threshold=0.9):
     # Tokenize input text
     # input_ids = tokenizer.encode(input_text, return_tensors="pt")
     # inputs = llava_processor(input_text, images=image, return_tensors="pt").to('cuda')
@@ -578,20 +650,36 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
 
                 dist = (dist1+dist2)/2
 
-                print(dist1[:10], dist2[:10], dist[:10])
+                # print(dist1[:10], dist2[:10], dist[:10])
 
-                threshold_mean = 0.9*dist1.mean() + 0.1*dist2.mean()
-                threshold_std = 0.9*dist1.std() + 0.1*dist2.std()
+                # threshold_mean = 0.9*dist1.mean() + 0.1*dist2.mean()
+                # threshold_std = 0.9*dist1.std() + 0.1*dist2.std()
 
-                threshold = dist.mean() - 2*dist.std()
+                # threshold = dist.mean() - 2*dist.std()
 
-                print(threshold.item())
+                # print(threshold.item())
+
+                dist_sorted, indices_sort = dist.sort(dim=-1)
+
+                print(dist[:10], dist_sorted[:10])
+
+                # percentage = 0.1 #only select top 10% of the topk tokens based on their closeness to the projected multimodal embedding (the constraint)
+                percentage = 0.2
+                num_vals = int(percentage*topk)-1
+
+                threshold = dist_sorted[num_vals].item()
+
+
+
+                # print(dist[:20])
+
+                # print(0/0)
 
                 
                 num_examples = 0
                 for counter, i in enumerate(list(dist.detach().cpu().numpy())):
                     
-                    if i.item()<=threshold.item():
+                    if i.item()<=threshold:
                         num_examples +=1
                 
                 print('number of such examples {}'.format(num_examples))
@@ -599,7 +687,7 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
 
                 for counter, i in enumerate(list(dist.detach().cpu().numpy())):
                     
-                    if i.item()<=threshold.item(): # cosine similarity must be positive (>=epsilon)
+                    if i.item()<=threshold: # cosine similarity must be positive (>=epsilon)
                         new_input_ids = t3[counter,:].unsqueeze(0)
                         attention_mask = torch.ones(new_input_ids.shape, dtype=torch.long).to('cuda')
                         new_score = (score * (seq_len - 1) + token_score[counter].item()) / (seq_len)
@@ -1124,7 +1212,7 @@ for batch in dataloader:
 
     for idx,txt in zip(pred_lab.squeeze().detach().cpu().numpy(), batch[1]['texts']):
 
-        prefix = f"USER: <image>\nGiven the input (a question and an image) and the generated answer, generate an explanation behind the answer.\n Question: {txt} Answer: {config.id2label[idx]}. Explanation: Because\nASSISTANT:"
+        prefix = f"""USER: <image>\nGiven the input (a question and an image) and the generated answer, generate an explanation behind the answer.\n Question: {txt} Answer: {config.id2label[idx]}. \nASSISTANT: The answer to the question "{txt}" is "{config.id2label[idx]}" because"""
         prefix_sets.append(prefix)
 
     # print("Predicted answer:", model.config.id2label[idx])
