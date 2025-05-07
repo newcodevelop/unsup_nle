@@ -388,7 +388,7 @@ torch.save(model.state_dict(), './models/vb_vqav2.pt')
 print('VisualBERT Training Completed and Model saved')
 
 
-
+# code ends here/......
 
 print(0/0)
 

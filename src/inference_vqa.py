@@ -705,7 +705,7 @@ llava_tokenizer = AutoTokenizer.from_pretrained("llava-hf/llava-1.5-7b-hf")
 
 
 
-def beam_search_1(llava_model, llava_processor, constant_vector, input_text, image, beam_width=4, max_length=20, topk=800, threshold=0.9):
+def beam_search_1(llava_model, llava_processor, constant_vector, input_text, image, beam_width=4, max_length=32, topk=200, threshold=0.9):
     # Tokenize input text
     # input_ids = tokenizer.encode(input_text, return_tensors="pt")
     # inputs = llava_processor(input_text, images=image, return_tensors="pt").to('cuda')
@@ -780,7 +780,7 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
 
             dimensions.append(batch_seq_input_ids.shape[0])
 
-            print(batch_seq_input_ids.shape)
+            # print(batch_seq_input_ids.shape)
 
         
             # batch_seq = {"input_ids":batch_seq_input_ids , "attention_mask": batch_seq_attn_mask, "pixel_values": batch_seq_pixel_values}
@@ -794,8 +794,8 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
         batch_seq_all['attention_mask'] = torch.cat(batch_seq_all['attention_mask'], dim=0)
         batch_seq_all['pixel_values'] = torch.cat(batch_seq_all['pixel_values'], dim=0)
 
-        for i in batch_seq_all:
-            print(i, batch_seq_all[i].shape)
+        # for i in batch_seq_all:
+        #     print(i, batch_seq_all[i].shape)
 
         # B, N = batch_seq_all['input_ids'].shape[:2]
 
@@ -814,9 +814,9 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
         topk_indices_splits = list(torch.split(topk_indices, dimensions, dim=0))
         topk_logits_splits = list(torch.split(topk_logits, dimensions, dim=0))
 
-        for i,j in zip(topk_indices_splits, topk_logits_splits):
-            print(i.shape, j.shape)
-        print(len(topk_indices_splits))
+        # for i,j in zip(topk_indices_splits, topk_logits_splits):
+        #     print(i.shape, j.shape)
+        # print(len(topk_indices_splits))
 
 
         for cnt, beam in enumerate(list(batch_beams)):
@@ -834,12 +834,12 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
                 t2 = token_id.view(topk,1,1)
                 t3 = torch.cat([t1,t2],dim=-1).squeeze() # (200,seq_len+1)
 
-                print(t3.shape)
+                # print(t3.shape)
 
                 candidates = llava_processor.tokenizer.batch_decode(t3, skip_special_tokens=True)
                 candidates = list(map(lambda x: x.split('ASSISTANT:')[-1].strip(), candidates))
 
-                print('cand', candidates[:10], len(candidates))
+                # print('cand', candidates[:10], len(candidates))
 
 
                 clip_inputs = clip_tokenizer(candidates, return_tensors="pt", padding=True)
@@ -849,13 +849,13 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
                 with torch.no_grad():
                     clip_embeddings = clip_model.get_text_features(input_ids = clip_inputs['input_ids'].to('cuda'), attention_mask = clip_inputs['attention_mask'].to('cuda'))
 
-                print(clip_embeddings.shape)
+                # print(clip_embeddings.shape)
 
                 
 
                 with torch.no_grad():
                     target_future_embedding = mlp(clip_embeddings)
-                print(target_future_embedding.shape)
+                # print(target_future_embedding.shape)
                 cv = constant_vector[cnt,:].unsqueeze(0).expand(topk,-1)
                 # similarities_expected = F.cosine_similarity(target_future_embedding, cv, dim=1)
                 # similarities_now = F.cosine_similarity(clip_embeddings, cv, dim=1)
@@ -876,7 +876,7 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
                 target_future_embedding = F.normalize(model_Q(target_future_embedding.to(device)), dim=1)
                 clip_embeddings = F.normalize(model_Q(clip_embeddings.to(device)), dim=1)
 
-                print(cv.shape,target_future_embedding.shape, clip_embeddings.shape )
+                # print(cv.shape,target_future_embedding.shape, clip_embeddings.shape )
 
                 dist1 = torch.norm(cv - target_future_embedding, dim=1)
                 dist2 = torch.norm(cv - clip_embeddings, dim=1)
@@ -890,7 +890,7 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
 
                 
 
-                print(dist1[:10], dist2[:10], dist[:10], threshold)
+                # print(dist1[:10], dist2[:10], dist[:10], threshold)
 
                
 
@@ -906,7 +906,8 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
                 # print(dist[:10], dist_sorted[:10])
 
                 # # percentage = 0.1 #only select top 10% of the topk tokens based on their closeness to the projected multimodal embedding (the constraint)
-                percentage = 0.2
+                # percentage = 0.15
+                percentage = 0.8
                 num_vals = int(percentage*topk)-1
 
                 threshold = dist_sorted[num_vals].item()
@@ -924,7 +925,7 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
                     if i.item()<=threshold:
                         num_examples +=1
                 
-                print('number of such examples {}'.format(num_examples))
+                # print('number of such examples {}'.format(num_examples))
 
 
                 for counter, i in enumerate(list(dist.detach().cpu().numpy())):
@@ -1023,14 +1024,17 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
 
         """
         
-    for i in batch_beams:
-        b = batch_beams[i]
-        print(i, llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True))
-    for i in dropped:
-        b = dropped[i]
-        print(i, llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True))
+    # for i in batch_beams:
+    #     b = batch_beams[i]
+    #     print(i, llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True))
+    # for i in dropped:
+    #     b = dropped[i]
+    #     print(i, llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True))
+    
+    batch_beams.update(dropped)
 
-    print(0/0)
+    return batch_beams
+
 
 
 
@@ -1439,15 +1443,17 @@ def collate_fn(batch):
 
 dataloader = DataLoader(dataset, batch_size=BATCH_SIZE, shuffle=False, collate_fn=collate_fn)
 
-for batch in dataloader:
-    print(batch)
+k = {}
+
+for pp, batch in enumerate(dataloader):
+    # print(batch)
     inputs = batch[0]
-    for i in inputs:
-        print(inputs[i].shape)
+    # for i in inputs:
+    #     print(inputs[i].shape)
     with torch.no_grad():
         pred_lab, pooled_output = model(**inputs)
-    print(batch[1])
-    print(pred_lab, pooled_output.shape)
+    # print(batch[1])
+    # print(pred_lab, pooled_output.shape)
     pooled_output = pooled_output.squeeze()
 
     prefix_sets = []
@@ -1458,18 +1464,51 @@ for batch in dataloader:
         prefix_sets.append(prefix)
 
     # print("Predicted answer:", model.config.id2label[idx])
-    print('prefix', prefix_sets)
+    # print('prefix', prefix_sets)
     with torch.no_grad():
         proj_F.eval()
         f_out = F.normalize(proj_F(pooled_output.to('cuda')), dim=1)
         
     
-    print(f_out.shape)
+    # print(f_out.shape)
 
-    b = beam_search_1(llava_model, llava_processor, f_out, prefix_sets, batch[1]['images'], threshold=0.92)
+    try:
+        batch_beams = beam_search_1(llava_model, llava_processor, f_out, prefix_sets, batch[1]['images'], threshold=0.92)
+    except:
+        continue
+    
+    # k[pp] = batch_beams
+
+    print(pp)
+
+
+    dd = {}
+    for i in batch_beams:
+        b = batch_beams[i]
+        # dd.append((i, llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True)))
+        dd[i] = llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True)[0]
+        print(i, llava_processor.tokenizer.batch_decode(b[0][0]['input_ids'], skip_special_tokens=True))
+    k[pp] = dd
 
     # b = batched_beam_search(llava_model, llava_processor, constant_vector, prefix_sets, batch[1]['images'], threshold=0.9)
-    break
+    # break
+
+    if pp==1000:
+        break
+
+
+import json
+
+with open('./k_normal_0_8.json', 'w') as fp:
+    json.dump(k, fp)
+
+
+# import pickle
+
+
+
+# with open('./k.pickle', 'wb') as handle:
+#     pickle.dump(k, handle, protocol=pickle.HIGHEST_PROTOCOL)
 
 print(0/0)
 
