@@ -486,8 +486,8 @@ class ProjectorF(nn.Module):
 # -----------------------------
 
 def train_Q(concepts_X, concepts_Y,
-            embed_dim=256, margin=1.0,
-            batch_size=16, num_epochs=50,
+            embed_dim=256, margin=0.2,
+            batch_size=16, num_epochs=100,
             lr=1e-4, device='cuda'):
     """
     Train Q so that for each pair (x_i, y_i):
@@ -508,8 +508,12 @@ def train_Q(concepts_X, concepts_Y,
             x_batch = x_batch.to(device)
             y_batch = y_batch.to(device)
 
-            q_x = F.normalize(model_Q(x_batch), dim=1)
-            q_y = F.normalize(model_Q(y_batch), dim=1)
+            # q_x = F.normalize(model_Q(x_batch), dim=1)
+            # q_y = F.normalize(model_Q(y_batch), dim=1)
+
+            q_x = model_Q(x_batch)
+            q_y = model_Q(y_batch)
+
             dist = torch.norm(q_x - q_y, dim=1)
 
             # enforce dist >= margin per pair
@@ -533,7 +537,7 @@ def train_Q(concepts_X, concepts_Y,
 
 def train_F(anchors, concepts_X, concepts_Y, model_Q,
             embed_dim=256, margin=0.5,
-            batch_size=32, num_epochs=50,
+            batch_size=32, num_epochs=100,
             lr=1e-5, device='cuda'):
     """
     For each example i, trains F so that:
@@ -558,10 +562,14 @@ def train_F(anchors, concepts_X, concepts_Y, model_Q,
             y_batch = y_batch.to(device)
 
             # forward
-            f_a = F.normalize(model_F(a_batch), dim=1)
+            # f_a = F.normalize(model_F(a_batch), dim=1)
+            f_a = model_F(a_batch)
             with torch.no_grad():
                 q_x = F.normalize(model_Q(x_batch), dim=1)
                 q_y = F.normalize(model_Q(y_batch), dim=1)
+
+                # q_x = model_Q(x_batch)
+                # q_y = model_Q(y_batch)
 
             pos_dist = torch.norm(f_a - q_x, dim=1)
             neg_dist = torch.norm(f_a - q_y, dim=1)
@@ -590,6 +598,12 @@ with torch.no_grad():
     f_out = F.normalize(proj_F(anchors_.to(device)), dim=1)
     q_x  = F.normalize(model_Q(positives_.to(device)), dim=1)
     q_y  = F.normalize(model_Q(negatives_.to(device)), dim=1)
+
+    # f_out = proj_F(anchors_.to(device))
+    # q_x  = model_Q(positives_.to(device))
+    # q_y  = model_Q(negatives_.to(device))
+
+
     d_pos = torch.norm(f_out - q_x, dim=1)
     d_neg = torch.norm(f_out - q_y, dim=1)
 print('Mean pos dist:', d_pos.mean().item(), 'Mean neg dist:', d_neg.mean().item())
@@ -606,8 +620,11 @@ threshold = (beta-alpha)/2
 threshold = threshold.item()
 
 
+print(threshold)
 
-
+print('positive threshold means 95% of the anchor-positive data is below alpha and 5% of the anchor-negative data below beta')
+print('so alpha is a good threshold as distance')
+# print(0/0)
 
 
 
@@ -705,7 +722,7 @@ llava_tokenizer = AutoTokenizer.from_pretrained("llava-hf/llava-1.5-7b-hf")
 
 
 
-def beam_search_1(llava_model, llava_processor, constant_vector, input_text, image, beam_width=4, max_length=32, topk=200, threshold=0.9):
+def beam_search_1(llava_model, llava_processor, constant_vector, input_text, image, beam_width=4, max_length=32, topk=500, threshold=0.9):
     # Tokenize input text
     # input_ids = tokenizer.encode(input_text, return_tensors="pt")
     # inputs = llava_processor(input_text, images=image, return_tensors="pt").to('cuda')
@@ -907,7 +924,7 @@ def beam_search_1(llava_model, llava_processor, constant_vector, input_text, ima
 
                 # # percentage = 0.1 #only select top 10% of the topk tokens based on their closeness to the projected multimodal embedding (the constraint)
                 # percentage = 0.15
-                percentage = 0.8
+                percentage = 0.2
                 num_vals = int(percentage*topk)-1
 
                 threshold = dist_sorted[num_vals].item()
@@ -1374,9 +1391,354 @@ def batched_beam_search(llava_model, llava_processor, constant_vector, input_tex
 
 
 
+# import torch
+# from transformers import AutoProcessor, LlavaForConditionalGeneration
+
+# # Load the model in half-precision
+# model = LlavaForConditionalGeneration.from_pretrained("llava-hf/llava-1.5-7b-hf", torch_dtype=torch.float16, device_map="auto")
+# processor = AutoProcessor.from_pretrained("llava-hf/llava-1.5-7b-hf")
+
+
+# Prepare a batch of two prompts
+conversation_1 = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image", "url": "https://www.ilankelman.org/stopsigns/australia.jpg"},
+            {"type": "text", "text": "What is shown in this image?"},
+        ],
+    },
+]
+
+conversation_2 = [
+    {
+        "role": "user",
+        "content": [
+            {"type": "image", "url": "http://images.cocodataset.org/val2017/000000039769.jpg"},
+            {"type": "text", "text": "What is shown in this image?"},
+        ],
+    },
+]
+
+inputs = llava_processor.apply_chat_template(
+    [conversation_1, conversation_2],
+    add_generation_prompt=True,
+    tokenize=True,
+    return_dict=True,
+    padding=True,
+    return_tensors="pt"
+).to(llava_model.device, torch.float16)
+
+
+from transformers import LogitsProcessor
+
+# class MyScoringConstraint(LogitsProcessor):
+#     def __init__(self, penalty_factor: float):
+#         self.penalty = penalty_factor
+
+#     def __call__(self, input_ids, scores):
+#         # `scores` is [batch_size * num_beams, vocab_size]
+#         # apply a penalty to some tokens, e.g., discourage token ID 42
+
+#         print(input_ids, input_ids.shape)
+
+#         input_ids = input_ids.reshape(2,4,-1)
+#         scores = scores.reshape(2,4,-1)
+
+#         scores = 
+
+#         # print(scores, scores.shape)
+#         # print(0/0)
+#         scores[:, 42] -= self.penalty
+#         return scores
+
+
+from transformers import LogitsProcessor
+import torch
+import torch.nn.functional as F
 
 
 
+
+# cv = torch.randn(500, 256).to('cuda')
+
+def process_candidates_in_batches(candidates, cv, batch_size, clip_tokenizer, clip_model, mlp, model_Q, device):
+    all_distances = []
+    
+    # Process candidates in batches
+    for i in range(0, len(candidates), batch_size):
+        batch_candidates = candidates[i:i+batch_size]
+
+        print(batch_candidates[:5])
+        
+        # Tokenize the current batch
+        clip_inputs = clip_tokenizer(batch_candidates, return_tensors="pt", padding=True)
+        
+        with torch.no_grad():
+            clip_embeddings = clip_model.get_text_features(
+                input_ids=clip_inputs['input_ids'].to(device), 
+                attention_mask=clip_inputs['attention_mask'].to(device)
+            )
+            
+            target_future_embedding = mlp(clip_embeddings)
+        
+        # Create random vectors for the current batch
+        
+        
+        # Normalize embeddings
+
+        target_future_embedding = F.normalize(model_Q(target_future_embedding.to(device)), dim=1)
+        clip_embeddings = F.normalize(model_Q(clip_embeddings.to(device)), dim=1)
+
+        # target_future_embedding = model_Q(target_future_embedding.to(device))
+        # clip_embeddings = model_Q(clip_embeddings.to(device))
+        
+        # Calculate distances
+        dist1 = torch.norm(cv - target_future_embedding, dim=1)
+        dist2 = torch.norm(cv - clip_embeddings, dim=1)
+        
+        batch_dist = (dist1 + dist2) / 2
+        all_distances.append(batch_dist)
+    
+    # Combine all batch results
+    final_distances = torch.cat(all_distances, dim=0)
+
+    print('fd', final_distances.shape, final_distances[:10])
+    return final_distances
+
+
+class SequenceAwareProcessor(LogitsProcessor):
+    def __init__(self, cv, penalty_factor=0.2):
+        """
+        Args:
+            scoring_function: A function that takes a tensor of shape 
+                             (batch_size, beam_length, num_candidates, seq_len+1)
+                             and returns scores of shape (batch_size, beam_length, num_candidates)
+            penalty_factor: Factor to scale the penalties
+        """
+        # self.scoring_function = scoring_function
+        self.penalty_factor = penalty_factor
+        # self.top_k = 32064  # Number of top vocabulary tokens to consider
+        self.top_k = 150
+        self.cv = cv
+        self.step_count = 0
+    def __call__(self, input_ids, scores) -> torch.FloatTensor:
+        # input_ids: (batch_size * num_beams, seq_len)
+        # scores: (batch_size * num_beams, vocab_size)
+        self.step_count+=1
+        batch_beam_size, vocab_size = scores.shape
+
+        # print(vocab_size)
+        # print(0/0)
+        seq_len = input_ids.shape[1]
+        
+        # Determine batch_size and num_beams from the input shape
+        # Assuming batch_size and num_beams are known or can be inferred
+        # For example, if you know num_beams:
+        num_beams = 4  # Replace with your actual num_beams
+        batch_size = batch_beam_size // num_beams
+        
+        # Reshape input_ids to (batch_size, num_beams, seq_len)
+        reshaped_input_ids = input_ids.view(batch_size, num_beams, seq_len)
+        
+        # Get the top-k token indices and their scores
+        top_k_values, top_k_indices = torch.topk(scores, k=self.top_k, dim=-1)
+        
+        # Reshape top_k_indices to (batch_size, num_beams, top_k)
+        top_k_indices = top_k_indices.view(batch_size, num_beams, self.top_k)
+
+        print(top_k_indices)
+
+        # print(top_k_indices.shape)
+        
+        # Create extended sequences by appending each top-k token to each sequence
+        # First, we need to expand input_ids to prepare for concatenation
+        # Shape: (batch_size, num_beams, 1, seq_len)
+        expanded_input_ids = reshaped_input_ids.unsqueeze(2)
+        
+        # Expand to repeat for each top-k token
+        # Shape: (batch_size, num_beams, top_k, seq_len)
+        expanded_input_ids = expanded_input_ids.expand(-1, -1, self.top_k, -1)
+        
+        # Prepare top_k_indices for concatenation
+        # Shape: (batch_size, num_beams, top_k, 1)
+        expanded_top_k = top_k_indices.unsqueeze(-1)
+        
+        # Concatenate to get extended sequences
+        # Shape: (batch_size, num_beams, top_k, seq_len+1)
+        extended_sequences = torch.cat([expanded_input_ids, expanded_top_k], dim=-1)
+
+        batch_size = extended_sequences.shape[0]
+        num_beams = extended_sequences.shape[1]
+
+        outer_batch = []
+
+        for i in range(batch_size):
+            inner_batch = []
+            for j in range(num_beams):
+
+                candidates = llava_processor.batch_decode(extended_sequences[i,j,:,:], skip_special_tokens=True)
+
+                # candidates = list(map(lambda x: x.split('ASSISTANT:')[-1].strip(), candidates))
+                
+                # split candidate based on the first occurence of because.
+                candidates = list(map(lambda x: x.split('because', 1)[-1].strip(), candidates))
+
+                # print('cand', candidates[:10], len(candidates))
+                constant_vector = self.cv[i,:].unsqueeze(0).expand(self.top_k,-1)
+
+                distances = process_candidates_in_batches(candidates, constant_vector, self.top_k, clip_tokenizer, clip_model, mlp, model_Q, 'cuda')
+
+                # print(distances.shape)
+
+                inner_batch.append(distances)
+            
+            outer_batch.append(torch.stack(inner_batch))
+        
+        outer_batch = torch.stack(outer_batch)
+
+        # outer_batch is the matrix containing all the distances.
+
+        # mask all those with large neg value which exceeds alpha
+
+        # Large negative number to subtract elsewhere
+        large_neg = 1e2
+
+        mask_dist = outer_batch > alpha.item()
+
+        # Replace values exceeding alpha with a large negative number
+        outer_batch[mask_dist] = large_neg  # Using 1e9 as a large negative valu
+
+        
+        print('ob', outer_batch)
+
+        # Create a mask tensor initialized with the large negative number
+        scores = scores.view(batch_size, num_beams, vocab_size)
+        mask = torch.full_like(scores, large_neg)
+
+        # Use advanced indexing to place subtract_tensor values at top_k indices
+        batch_idx = torch.arange(batch_size).view(-1, 1, 1).expand(-1, num_beams, self.top_k)
+        beam_idx = torch.arange(num_beams).view(1, -1, 1).expand(batch_size, -1, self.top_k)
+
+        # Scatter subtract_tensor values into mask at top_k indices
+        mask[batch_idx, beam_idx, top_k_indices] = outer_batch
+
+        # Subtract mask from scores
+
+        current_lambda = self.penalty_factor * (1 + 0.01 * self.step_count)
+
+
+        
+        modified_scores = scores - current_lambda*mask
+
+        # Convert back to 2D
+        modified_scores = modified_scores.view(batch_size * num_beams, vocab_size)
+
+        print(modified_scores)
+
+        print('cl', current_lambda)
+
+        # print(mask)
+        # print(0/0)
+
+        # print(outer_batch.shape)
+
+        
+
+
+        # clip_inputs = clip_tokenizer(candidates, return_tensors="pt", padding=True)
+
+
+
+        # with torch.no_grad():
+        #     clip_embeddings = clip_model.get_text_features(input_ids = clip_inputs['input_ids'].to('cuda'), attention_mask = clip_inputs['attention_mask'].to('cuda'))
+
+        # print(clip_embeddings.shape)
+
+        
+
+        # with torch.no_grad():
+        #     target_future_embedding = mlp(clip_embeddings)
+
+        # print(target_future_embedding.shape)
+
+        # cv = torch.randn(1,256).to('cuda').expand(100,-1)
+       
+
+        # target_future_embedding = F.normalize(model_Q(target_future_embedding.to(device)), dim=1)
+        # clip_embeddings = F.normalize(model_Q(clip_embeddings.to(device)), dim=1)
+
+        # # print(cv.shape,target_future_embedding.shape, clip_embeddings.shape )
+
+        # dist1 = torch.norm(cv - target_future_embedding, dim=1)
+        # dist2 = torch.norm(cv - clip_embeddings, dim=1)
+
+
+
+            
+
+
+        # dist = (dist1+dist2)/2
+
+        
+
+
+        
+        
+        # Score the extended sequences using the provided scoring function
+        # Shape of sequence_scores: (batch_size, num_beams, top_k)
+
+        # print(input_ids)
+
+
+        # sequence_scores = self.scoring_function(extended_sequences)
+        
+        # # Apply penalties to the original scores based on the sequence scores
+        # # First, reshape scores to (batch_size, num_beams, vocab_size)
+        # reshaped_scores = scores.view(batch_size, num_beams, vocab_size)
+        
+        # # For each beam and each top-k token, apply the penalty
+        # for batch_idx in range(batch_size):
+        #     for beam_idx in range(num_beams):
+        #         for k_idx in range(self.top_k):
+        #             token_idx = top_k_indices[batch_idx, beam_idx, k_idx].item()
+        #             penalty = sequence_scores[batch_idx, beam_idx, k_idx] * self.penalty_factor
+        #             reshaped_scores[batch_idx, beam_idx, token_idx] -= penalty
+        
+        # # Reshape back to original shape
+        return modified_scores
+
+
+
+
+
+
+
+
+from transformers import LogitsProcessorList
+
+# processors = LogitsProcessorList([
+#     SequenceAwareProcessor(penalty_factor=2),
+#     # you can also include built-in processors, e.g., MinLengthLogitsProcessor
+# ])
+
+
+
+# import time
+# # Generate
+# a = time.time()
+
+# print(inputs)
+# print(0/0)
+
+
+# generate_ids = llava_model.generate(**inputs, max_new_tokens=30, num_beams=4, logits_processor=processors)
+# print(llava_processor.batch_decode(generate_ids, skip_special_tokens=True))
+# b = time.time()
+
+# print(b-a)
+
+# print(0/0)
 
 
 
@@ -1402,7 +1764,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 from transformers import AutoTokenizer
 
-
+import time
 
 
 
@@ -1468,6 +1830,30 @@ for pp, batch in enumerate(dataloader):
     with torch.no_grad():
         proj_F.eval()
         f_out = F.normalize(proj_F(pooled_output.to('cuda')), dim=1)
+
+        # f_out = proj_F(pooled_output.to('cuda'))
+
+        # f_out = torch.randn(16, 256).to('cuda')
+
+
+    print('f_out shape', f_out.shape)
+    processors = LogitsProcessorList([
+    SequenceAwareProcessor(f_out, penalty_factor=2),
+    # you can also include built-in processors, e.g., MinLengthLogitsProcessor
+    ])
+
+    inputs = llava_processor(text=prefix_sets, images=batch[1]['images'], padding=True, truncation=True, return_tensors="pt").to('cuda')
+
+    aa = time.time()
+    generate_ids = llava_model.generate(**inputs, max_new_tokens=32, num_beams=4, logits_processor=processors)
+    print(llava_processor.batch_decode(generate_ids, skip_special_tokens=True))
+    bb = time.time()
+
+    print(bb-aa)
+
+    print(0/0)
+
+
         
     
     # print(f_out.shape)
@@ -1499,8 +1885,8 @@ for pp, batch in enumerate(dataloader):
 
 import json
 
-with open('./k_normal_0_8.json', 'w') as fp:
-    json.dump(k, fp)
+# with open('./k_normal_0_8.json', 'w') as fp:
+#     json.dump(k, fp)
 
 
 # import pickle
